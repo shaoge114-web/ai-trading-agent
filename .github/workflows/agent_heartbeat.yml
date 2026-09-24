@@ -27,4 +27,4 @@ jobs:
           PAPER_TRADING: "true"
           REAL_ORDER: "false"
         run: |
-          python agent_runtime.py
+          python -c "from app import app; r=app.test_client().get('/api/analyze'); print('HTTP_STATUS:', r.status_code); print(r.get_data(as_text=True)); raise SystemExit(0 if r.status_code == 200 else 1)"
