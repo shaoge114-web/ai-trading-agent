@@ -30,19 +30,20 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Prepare agent state
+      - name: Prepare state directory
         run: |
           mkdir -p .agent_state
 
       - name: Restore agent state
+        id: restore-state
         uses: actions/cache@v4
         with:
           path: .agent_state
-          key: ai-agent-state-main-${{ github.run_id }}
+          key: ai-agent-state-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
-            ai-agent-state-main-
+            ai-agent-state-${{ github.ref_name }}-
 
-      - name: Run agent heartbeat
+      - name: Run AI Trading Agent
         env:
           PAPER_TRADING: "true"
           REAL_ORDER: "false"
@@ -50,20 +51,19 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
-          import pandas as pd
 
-          STATE_PATH = Path(".agent_state/state.json")
-
-          from app import app, agent
+          from app import agent
           from OKX_LIVE_CANDLES_REFERENCE import get_okx_live_candles
           from agent_runtime import calculate_verified_features
 
+          STATE_PATH = Path(".agent_state/state.json")
+
           print("=" * 70)
-          print("AI TRADING AGENT — LIVE HEARTBEAT")
+          print("AI TRADING AGENT - LIVE HEARTBEAT")
           print("=" * 70)
 
           # ------------------------------------------------------------
-          # RESTORE PREVIOUS AGENT STATE
+          # RESTORE STATE
           # ------------------------------------------------------------
           if STATE_PATH.exists():
               with open(STATE_PATH, "r", encoding="utf-8") as f:
@@ -77,17 +77,19 @@ jobs:
               agent.last_timestamp = saved_agent.get("last_timestamp")
 
               print("STATE: RESTORED")
-              print("PREVIOUS STATUS:", agent.status)
-              print("PREVIOUS POSITION:", agent.position)
+              print("STATUS:", agent.status)
+              print("POSITION:", agent.position)
               print("LAST TIMESTAMP:", agent.last_timestamp)
+
           else:
               print("STATE: NEW")
 
           # ------------------------------------------------------------
-          # GET LIVE OKX MARKET DATA
+          # LIVE MARKET DATA
           # ------------------------------------------------------------
           candles = get_okx_live_candles()
           features = calculate_verified_features(candles)
+
           row = features.iloc[-1].to_dict()
 
           current_timestamp = str(row["timestamp"])
@@ -98,7 +100,7 @@ jobs:
           print("CLOSE:", row["close"])
 
           # ------------------------------------------------------------
-          # PREVENT PROCESSING THE SAME 15m CANDLE MULTIPLE TIMES
+          # PREVENT DUPLICATE CANDLE PROCESSING
           # ------------------------------------------------------------
           previous_timestamp = agent.last_timestamp
 
@@ -106,12 +108,14 @@ jobs:
               previous_timestamp is not None
               and str(previous_timestamp) == current_timestamp
           ):
+              print("-" * 70)
               print("CANDLE STATUS: ALREADY PROCESSED")
               print("ACTION: SKIP DUPLICATE CANDLE")
+              print("-" * 70)
 
           else:
               # --------------------------------------------------------
-              # REAL AGENT PROCESSING
+              # PROCESS CURRENT CANDLE
               # --------------------------------------------------------
               result = agent.process_feature_row(row)
 
@@ -121,7 +125,7 @@ jobs:
               print(json.dumps(result, indent=2, default=str))
 
           # ------------------------------------------------------------
-          # SAVE STATE FOR NEXT RUN
+          # SAVE STATE
           # ------------------------------------------------------------
           state_payload = {
               "version": 1,
