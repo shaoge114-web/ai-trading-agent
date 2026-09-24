@@ -5,9 +5,17 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-trading-agent-heartbeat
+  cancel-in-progress: false
+
 jobs:
   heartbeat:
     runs-on: ubuntu-latest
+    timeout-minutes: 4
 
     steps:
       - name: Checkout repository
@@ -22,9 +30,119 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+      - name: Prepare agent state
+        run: |
+          mkdir -p .agent_state
+
+      - name: Restore agent state
+        uses: actions/cache@v4
+        with:
+          path: .agent_state
+          key: ai-agent-state-main-${{ github.run_id }}
+          restore-keys: |
+            ai-agent-state-main-
+
       - name: Run agent heartbeat
         env:
           PAPER_TRADING: "true"
           REAL_ORDER: "false"
         run: |
-          python -c "from app import app; r=app.test_client().get('/api/analyze'); print('HTTP_STATUS:', r.status_code); print(r.get_data(as_text=True)); raise SystemExit(0 if r.status_code == 200 else 1)"
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import pandas as pd
+
+          STATE_PATH = Path(".agent_state/state.json")
+
+          from app import app, agent
+          from OKX_LIVE_CANDLES_REFERENCE import get_okx_live_candles
+          from agent_runtime import calculate_verified_features
+
+          print("=" * 70)
+          print("AI TRADING AGENT — LIVE HEARTBEAT")
+          print("=" * 70)
+
+          # ------------------------------------------------------------
+          # RESTORE PREVIOUS AGENT STATE
+          # ------------------------------------------------------------
+          if STATE_PATH.exists():
+              with open(STATE_PATH, "r", encoding="utf-8") as f:
+                  saved = json.load(f)
+
+              saved_agent = saved.get("agent", {})
+
+              agent.status = saved_agent.get("status", "READY")
+              agent.position = saved_agent.get("position")
+              agent.last_signal = saved_agent.get("last_signal")
+              agent.last_timestamp = saved_agent.get("last_timestamp")
+
+              print("STATE: RESTORED")
+              print("PREVIOUS STATUS:", agent.status)
+              print("PREVIOUS POSITION:", agent.position)
+              print("LAST TIMESTAMP:", agent.last_timestamp)
+          else:
+              print("STATE: NEW")
+
+          # ------------------------------------------------------------
+          # GET LIVE OKX MARKET DATA
+          # ------------------------------------------------------------
+          candles = get_okx_live_candles()
+          features = calculate_verified_features(candles)
+          row = features.iloc[-1].to_dict()
+
+          current_timestamp = str(row["timestamp"])
+
+          print("MARKET: BTC-USDT")
+          print("TIMEFRAME: 15m")
+          print("CURRENT CANDLE:", current_timestamp)
+          print("CLOSE:", row["close"])
+
+          # ------------------------------------------------------------
+          # PREVENT PROCESSING THE SAME 15m CANDLE MULTIPLE TIMES
+          # ------------------------------------------------------------
+          previous_timestamp = agent.last_timestamp
+
+          if (
+              previous_timestamp is not None
+              and str(previous_timestamp) == current_timestamp
+          ):
+              print("CANDLE STATUS: ALREADY PROCESSED")
+              print("ACTION: SKIP DUPLICATE CANDLE")
+
+          else:
+              # --------------------------------------------------------
+              # REAL AGENT PROCESSING
+              # --------------------------------------------------------
+              result = agent.process_feature_row(row)
+
+              print("-" * 70)
+              print("AGENT RESULT")
+              print("-" * 70)
+              print(json.dumps(result, indent=2, default=str))
+
+          # ------------------------------------------------------------
+          # SAVE STATE FOR NEXT RUN
+          # ------------------------------------------------------------
+          state_payload = {
+              "version": 1,
+              "agent": agent.export_state(),
+          }
+
+          with open(STATE_PATH, "w", encoding="utf-8") as f:
+              json.dump(
+                  state_payload,
+                  f,
+                  indent=2,
+                  ensure_ascii=False,
+                  default=str,
+              )
+
+          print("-" * 70)
+          print("STATE SAVED")
+          print("-" * 70)
+          print(json.dumps(state_payload, indent=2, default=str))
+
+          print("=" * 70)
+          print("HEARTBEAT COMPLETE")
+          print("=" * 70)
+          PY
