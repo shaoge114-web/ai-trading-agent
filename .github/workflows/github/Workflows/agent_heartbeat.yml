@@ -2,7 +2,7 @@ name: AI Trading Agent Heartbeat
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "2-59/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -62,9 +62,10 @@ jobs:
           print("AI TRADING AGENT - LIVE HEARTBEAT")
           print("=" * 70)
 
-          # ------------------------------------------------------------
+          # ----------------------------------------------------------
           # RESTORE STATE
-          # ------------------------------------------------------------
+          # ----------------------------------------------------------
+
           if STATE_PATH.exists():
               with open(STATE_PATH, "r", encoding="utf-8") as f:
                   saved = json.load(f)
@@ -74,6 +75,7 @@ jobs:
               agent.status = saved_agent.get("status", "READY")
               agent.position = saved_agent.get("position")
               agent.last_signal = saved_agent.get("last_signal")
+              agent.last_decision = saved_agent.get("last_decision")
               agent.last_timestamp = saved_agent.get("last_timestamp")
 
               print("STATE: RESTORED")
@@ -84,51 +86,93 @@ jobs:
           else:
               print("STATE: NEW")
 
-          # ------------------------------------------------------------
+          # ----------------------------------------------------------
           # LIVE MARKET DATA
-          # ------------------------------------------------------------
+          # ----------------------------------------------------------
+
           candles = get_okx_live_candles()
-          features = calculate_verified_features(candles)
 
-          row = features.iloc[-1].to_dict()
+          # Only confirmed/closed candles are allowed.
+          confirmed = candles[
+              candles["confirm"].astype(str) == "1"
+          ].copy()
 
-          current_timestamp = str(row["timestamp"])
+          if confirmed.empty:
+              raise RuntimeError("No confirmed candles available")
 
-          print("MARKET: BTC-USDT")
-          print("TIMEFRAME: 15m")
-          print("CURRENT CANDLE:", current_timestamp)
-          print("CLOSE:", row["close"])
+          features = calculate_verified_features(confirmed)
 
-          # ------------------------------------------------------------
-          # PREVENT DUPLICATE CANDLE PROCESSING
-          # ------------------------------------------------------------
-          previous_timestamp = agent.last_timestamp
+          # ----------------------------------------------------------
+          # FIND UNPROCESSED CONFIRMED CANDLES
+          # ----------------------------------------------------------
 
-          if (
-              previous_timestamp is not None
-              and str(previous_timestamp) == current_timestamp
-          ):
+          last_timestamp = agent.last_timestamp
+
+          if last_timestamp is None:
+              pending = features.copy()
+              print("PROCESS MODE: INITIAL")
+          else:
+              previous_ts = str(last_timestamp)
+
+              pending = features[
+                  features["timestamp"].astype(str) > previous_ts
+              ].copy()
+
+              print("PROCESS MODE: INCREMENTAL")
+
+          if pending.empty:
+              latest = features.iloc[-1]
+
+              print("MARKET: BTC-USDT")
+              print("TIMEFRAME: 15m")
+              print("LATEST CONFIRMED CANDLE:", str(latest["timestamp"]))
+              print("CLOSE:", latest["close"])
+
               print("-" * 70)
-              print("CANDLE STATUS: ALREADY PROCESSED")
-              print("ACTION: SKIP DUPLICATE CANDLE")
+              print("CANDLE STATUS: NO NEW CONFIRMED CANDLE")
+              print("ACTION: WAIT")
               print("-" * 70)
 
           else:
-              # --------------------------------------------------------
-              # PROCESS CURRENT CANDLE
-              # --------------------------------------------------------
-              result = agent.process_feature_row(row)
+              print("MARKET: BTC-USDT")
+              print("TIMEFRAME: 15m")
+              print("PENDING CONFIRMED CANDLES:", len(pending))
 
-              print("-" * 70)
-              print("AGENT RESULT")
-              print("-" * 70)
-              print(json.dumps(result, indent=2, default=str))
+              # ------------------------------------------------------
+              # PROCESS EVERY MISSED CONFIRMED CANDLE SEQUENTIALLY
+              # ------------------------------------------------------
 
-          # ------------------------------------------------------------
+              for _, row in pending.iterrows():
+
+                  current_timestamp = str(row["timestamp"])
+
+                  print("-" * 70)
+                  print("PROCESSING CONFIRMED CANDLE")
+                  print("TIMESTAMP:", current_timestamp)
+                  print("CLOSE:", row["close"])
+                  print("-" * 70)
+
+                  result = agent.process_feature_row(row.to_dict())
+
+                  print("AGENT RESULT")
+                  print(json.dumps(
+                      result,
+                      indent=2,
+                      default=str
+                  ))
+
+                  # --------------------------------------------------
+                  # If a position closes, continue processing the
+                  # remaining confirmed candles so the agent can
+                  # detect a new valid entry afterward.
+                  # --------------------------------------------------
+
+          # ----------------------------------------------------------
           # SAVE STATE
-          # ------------------------------------------------------------
+          # ----------------------------------------------------------
+
           state_payload = {
-              "version": 1,
+              "version": 3,
               "agent": agent.export_state(),
           }
 
@@ -141,10 +185,15 @@ jobs:
                   default=str,
               )
 
-          print("-" * 70)
+          print("=" * 70)
           print("STATE SAVED")
-          print("-" * 70)
-          print(json.dumps(state_payload, indent=2, default=str))
+          print("=" * 70)
+
+          print(json.dumps(
+              state_payload,
+              indent=2,
+              default=str
+          ))
 
           print("=" * 70)
           print("HEARTBEAT COMPLETE")
