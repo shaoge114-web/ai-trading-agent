@@ -1,0 +1,10 @@
+{
+  "signal": "Signal_V2",
+  "adx_filter": true,
+  "adx_max": 25.0,
+  "atr_mult": 1.0,
+  "final_rr": 4.0,
+  "max_hold": 30,
+  "trail_activation_r": 3.0,
+  "one_position_only": true
+}

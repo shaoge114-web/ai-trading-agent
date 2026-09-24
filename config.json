@@ -1,0 +1,13 @@
+{
+  "project": "AI_Trading_Agent",
+  "version": "FINAL_V2",
+  "exchange": "OKX",
+  "market": "BTC-USDT",
+  "timeframe": "15m",
+  "real_order_enabled": false,
+  "paper_trading": true,
+  "whatsapp_enabled": true,
+  "analysis_image_enabled": true,
+  "trade_image_enabled": true,
+  "memory": "Firestore"
+}
