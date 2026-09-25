@@ -54,7 +54,6 @@ jobs:
         run: |
           python - <<'PY'
           import json
-          import os
           from pathlib import Path
 
           import pandas as pd
@@ -64,7 +63,6 @@ jobs:
               PAPER_TRADING,
               REAL_ORDER_ENABLED,
               get_okx_live_candles,
-              FINAL_STRATEGY,
               calculate_verified_features,
           )
 
@@ -92,12 +90,20 @@ jobs:
               if value is None:
                   return None
 
-              ts = pd.to_datetime(value, errors="coerce")
+              ts = pd.to_datetime(
+                  value,
+                  errors="coerce",
+              )
 
               if pd.isna(ts):
                   return None
 
-              return pd.Timestamp(ts)
+              ts = pd.Timestamp(ts)
+
+              if ts.tzinfo is not None:
+                  ts = ts.tz_localize(None)
+
+              return ts
 
           def normalize_position(position):
               if not isinstance(position, dict):
@@ -106,7 +112,9 @@ jobs:
               position = dict(position)
 
               if "entry_timestamp" in position:
-                  parsed = parse_timestamp(position["entry_timestamp"])
+                  parsed = parse_timestamp(
+                      position["entry_timestamp"]
+                  )
 
                   if parsed is not None:
                       position["entry_timestamp"] = parsed
@@ -118,6 +126,7 @@ jobs:
                   return None
 
               side = position.get("position")
+
               entry_timestamp = parse_timestamp(
                   position.get("entry_timestamp")
               )
@@ -135,21 +144,27 @@ jobs:
                   return ""
 
               if isinstance(value, float):
-                  return f"{value:.10f}".rstrip("0").rstrip(".")
+                  return (
+                      f"{value:.10f}"
+                      .rstrip("0")
+                      .rstrip(".")
+                  )
 
               return str(value)
 
           def ensure_journal():
-              if not JOURNAL_FILE.exists():
-                  JOURNAL_FILE.write_text(
-                      "# AI Trading Agent — Trade Journal\n\n"
-                      "## Trades\n\n"
-                      "| Trade ID | Side | Entry Time | Entry Price | "
-                      "Initial SL | TP | Exit Time | Exit Price | "
-                      "Exit Reason | R | Bars Held | Status | Mode |\n"
-                      "|---|---|---|---:|---:|---:|---|---:|---|---:|---:|---|---|\n",
-                      encoding="utf-8",
-                  )
+              if JOURNAL_FILE.exists():
+                  return
+
+              JOURNAL_FILE.write_text(
+                  "# AI Trading Agent — Trade Journal\n\n"
+                  "## Trades\n\n"
+                  "| Trade ID | Side | Entry Time | Entry Price | "
+                  "Initial SL | TP | Exit Time | Exit Price | "
+                  "Exit Reason | R | Bars Held | Status | Mode |\n"
+                  "|---|---|---|---:|---:|---:|---|---:|---|---:|---:|---|---|\n",
+                  encoding="utf-8",
+              )
 
           def read_journal():
               ensure_journal()
@@ -163,49 +178,63 @@ jobs:
                   return False
 
               content = read_journal()
-              return trade_id in content
+
+              for line in content.splitlines():
+                  if line.startswith("|") and trade_id in line:
+                      return True
+
+              return False
 
           def append_entry(position, source="SIGNAL"):
               trade_id = trade_id_from_position(position)
 
               if not trade_id:
-                  fail("Cannot create Trade ID from position.")
+                  fail(
+                      "Cannot create Trade ID from position."
+                  )
 
               if journal_has_trade(trade_id):
                   return False
 
               side = position.get("position")
+
               entry_timestamp = parse_timestamp(
                   position.get("entry_timestamp")
               )
 
-              mode = "PAPER"
-
-              if REAL_ORDER_ENABLED:
-                  mode = "REAL"
+              mode = "REAL" if REAL_ORDER_ENABLED else "PAPER"
 
               row = (
-                  f"| {trade_id} | {side} | "
+                  f"| {trade_id} | "
+                  f"{side or ''} | "
                   f"{entry_timestamp.isoformat() if entry_timestamp is not None else ''} | "
                   f"{fmt(position.get('entry'))} | "
                   f"{fmt(position.get('initial_sl'))} | "
                   f"{fmt(position.get('tp'))} | "
-                  f" |  |  |  | "
+                  f" | "
+                  f" | "
+                  f" | "
+                  f" | "
                   f"{fmt(position.get('bars_held', 0))} | "
-                  f"OPEN | {mode} |"
+                  f"OPEN | "
+                  f"{mode} |"
               )
 
               with JOURNAL_FILE.open(
                   "a",
                   encoding="utf-8",
               ) as f:
-                  f.write("\n" + row)
-
+                  f.write("\n")
+                  f.write(row)
+                  f.write("\n")
                   f.write(
-                      "\n\n"
                       f"<!-- ENTRY_SOURCE:{source} "
                       f"TRADE_ID:{trade_id} -->\n"
                   )
+
+              print(
+                  f"JOURNAL ENTRY ADDED: {trade_id}"
+              )
 
               return True
 
@@ -213,11 +242,13 @@ jobs:
               trade_id = trade_id_from_position(position)
 
               if not trade_id:
-                  fail("Cannot create Trade ID for EXIT.")
+                  fail(
+                      "Cannot create Trade ID for EXIT."
+                  )
 
               content = read_journal()
 
-              if trade_id not in content:
+              if not journal_has_trade(trade_id):
                   append_entry(
                       position,
                       source="EXIT_BOOTSTRAP",
@@ -228,11 +259,21 @@ jobs:
                   position.get("exit_timestamp")
               )
 
-              exit_price = position.get("exit_price")
-              entry = position.get("entry")
-              risk = position.get("risk")
+              exit_price = position.get(
+                  "exit_price"
+              )
 
-              side = position.get("position")
+              entry = position.get(
+                  "entry"
+              )
+
+              risk = position.get(
+                  "risk"
+              )
+
+              side = position.get(
+                  "position"
+              )
 
               r_value = None
 
@@ -244,12 +285,14 @@ jobs:
               ):
                   if side == "LONG":
                       r_value = (
-                          float(exit_price) - float(entry)
+                          float(exit_price)
+                          - float(entry)
                       ) / float(risk)
 
                   elif side == "SHORT":
                       r_value = (
-                          float(entry) - float(exit_price)
+                          float(entry)
+                          - float(exit_price)
                       ) / float(risk)
 
               lines = content.splitlines()
@@ -274,13 +317,27 @@ jobs:
                       continue
 
                   parts[7] = (
-                      f" {exit_timestamp.isoformat() if exit_timestamp is not None else ''} "
+                      f" "
+                      f"{exit_timestamp.isoformat() if exit_timestamp is not None else ''}"
+                      f" "
                   )
 
-                  parts[8] = f" {fmt(exit_price)} "
-                  parts[9] = f" {position.get('exit_reason', '')} "
-                  parts[10] = f" {fmt(r_value)} "
-                  parts[11] = f" {fmt(position.get('bars_held'))} "
+                  parts[8] = (
+                      f" {fmt(exit_price)} "
+                  )
+
+                  parts[9] = (
+                      f" {position.get('exit_reason', '')} "
+                  )
+
+                  parts[10] = (
+                      f" {fmt(r_value)} "
+                  )
+
+                  parts[11] = (
+                      f" {fmt(position.get('bars_held'))} "
+                  )
+
                   parts[12] = " CLOSED "
 
                   lines[i] = "|".join(parts)
@@ -288,6 +345,10 @@ jobs:
                   JOURNAL_FILE.write_text(
                       "\n".join(lines) + "\n",
                       encoding="utf-8",
+                  )
+
+                  print(
+                      f"JOURNAL EXIT UPDATED: {trade_id}"
                   )
 
                   return True
@@ -298,14 +359,23 @@ jobs:
           print("AI TRADING AGENT HEARTBEAT")
           print("=" * 60)
 
-          print(f"PAPER_TRADING       : {PAPER_TRADING}")
-          print(f"REAL_ORDER_ENABLED  : {REAL_ORDER_ENABLED}")
+          print(
+              f"PAPER_TRADING       : {PAPER_TRADING}"
+          )
+
+          print(
+              f"REAL_ORDER_ENABLED  : {REAL_ORDER_ENABLED}"
+          )
 
           if PAPER_TRADING is not True:
-              fail("Safety stop: PAPER_TRADING must remain True.")
+              fail(
+                  "Safety stop: PAPER_TRADING must remain True."
+              )
 
           if REAL_ORDER_ENABLED is not False:
-              fail("Safety stop: REAL_ORDER_ENABLED must remain False.")
+              fail(
+                  "Safety stop: REAL_ORDER_ENABLED must remain False."
+              )
 
           STATE_DIR.mkdir(
               parents=True,
@@ -345,7 +415,9 @@ jobs:
                       )
 
                       agent.position = normalize_position(
-                          saved_agent.get("position")
+                          saved_agent.get(
+                              "position"
+                          )
                       )
 
                       agent.last_signal = saved_agent.get(
@@ -357,13 +429,29 @@ jobs:
                       )
 
                       agent.last_timestamp = parse_timestamp(
-                          saved_agent.get("last_timestamp")
+                          saved_agent.get(
+                              "last_timestamp"
+                          )
                       )
 
                       state_loaded = True
 
                       print(
                           f"STATE RESTORED: version {version}"
+                      )
+
+                      print(
+                          f"RESTORED STATUS    : {agent.status}"
+                      )
+
+                      print(
+                          f"RESTORED POSITION  : "
+                          f"{agent.position}"
+                      )
+
+                      print(
+                          f"RESTORED TIMESTAMP : "
+                          f"{agent.last_timestamp}"
                       )
 
                   else:
@@ -373,21 +461,28 @@ jobs:
 
               except Exception as exc:
                   print(
-                      f"STATE REBUILD: {type(exc).__name__}: {exc}"
+                      "STATE REBUILD: "
+                      f"{type(exc).__name__}: {exc}"
                   )
 
           else:
-              print("STATE MISSING: rebuild required")
+              print(
+                  "STATE MISSING: rebuild required"
+              )
 
           candles = get_okx_live_candles()
 
           if candles is None or len(candles) == 0:
-              fail("No candles returned from OKX.")
+              fail(
+                  "No candles returned from OKX."
+              )
 
           candles = candles.copy()
 
           if "timestamp" not in candles.columns:
-              fail("Missing timestamp column.")
+              fail(
+                  "Missing timestamp column."
+              )
 
           candles["timestamp"] = pd.to_datetime(
               candles["timestamp"],
@@ -409,17 +504,22 @@ jobs:
           )
 
           if len(candles) < 20:
-              fail("Not enough candle data.")
+              fail(
+                  "Not enough candle data."
+              )
 
-          now = pd.Timestamp.utcnow()
+          now = pd.Timestamp.now(
+              "UTC"
+          ).tz_localize(None)
 
-          if now.tz is not None:
-              now = now.tz_localize(None)
+          latest_timestamp = parse_timestamp(
+              candles["timestamp"].iloc[-1]
+          )
 
-          latest_timestamp = candles["timestamp"].iloc[-1]
-
-          if latest_timestamp.tz is not None:
-              latest_timestamp = latest_timestamp.tz_localize(None)
+          if latest_timestamp is None:
+              fail(
+                  "Latest candle timestamp is invalid."
+              )
 
           age_minutes = (
               now - latest_timestamp
@@ -447,7 +547,9 @@ jobs:
           )
 
           if features is None or len(features) == 0:
-              fail("Feature engine returned no data.")
+              fail(
+                  "Feature engine returned no data."
+              )
 
           required_features = {
               "timestamp",
@@ -465,7 +567,8 @@ jobs:
 
           if missing:
               fail(
-                  f"Missing required feature columns: {sorted(missing)}"
+                  "Missing required feature columns: "
+                  f"{sorted(missing)}"
               )
 
           features["timestamp"] = pd.to_datetime(
@@ -494,47 +597,75 @@ jobs:
           ]
 
           for col in numeric_columns:
-
               features[col] = pd.to_numeric(
                   features[col],
                   errors="coerce",
               )
 
-              if not features[col].notna().all():
-                  fail(
-                      f"Non-finite or invalid values in {col}."
-                  )
+          warmup_rows = len(features)
+
+          features = features.dropna(
+              subset=numeric_columns
+          ).reset_index(drop=True)
+
+          removed_warmup_rows = (
+              warmup_rows - len(features)
+          )
+
+          print(
+              f"FEATURE WARMUP REMOVED: "
+              f"{removed_warmup_rows}"
+          )
+
+          if len(features) == 0:
+              fail(
+                  "No valid feature rows remain "
+                  "after indicator warm-up."
+              )
 
           for col in numeric_columns:
 
-              if not pd.Series(
-                  features[col]
-              ).map(
-                  lambda x: pd.notna(x)
-                  and pd.api.types.is_number(x)
+              if not features[col].map(
+                  lambda x:
+                      pd.notna(x)
+                      and pd.api.types.is_number(x)
+                      and pd.api.types.isfinite(x)
               ).all():
+
                   fail(
-                      f"Invalid numeric values in {col}."
+                      f"Non-finite or invalid values remain in {col}."
                   )
 
-          earliest_timestamp = features[
-              "timestamp"
-          ].iloc[0]
+          earliest_timestamp = parse_timestamp(
+              features["timestamp"].iloc[0]
+          )
 
-          latest_confirmed = features[
-              "timestamp"
-          ].iloc[-1]
+          latest_confirmed = parse_timestamp(
+              features["timestamp"].iloc[-1]
+          )
+
+          if (
+              earliest_timestamp is None
+              or latest_confirmed is None
+          ):
+              fail(
+                  "Invalid feature timestamps."
+              )
 
           print(
               f"FEATURE WINDOW      : "
-              f"{earliest_timestamp} -> {latest_confirmed}"
+              f"{earliest_timestamp} -> "
+              f"{latest_confirmed}"
           )
 
           last_timestamp = parse_timestamp(
               agent.last_timestamp
           )
 
-          if state_loaded and last_timestamp is not None:
+          if (
+              state_loaded
+              and last_timestamp is not None
+          ):
 
               if last_timestamp < earliest_timestamp:
 
@@ -546,7 +677,8 @@ jobs:
                       )
 
                   print(
-                      "STATE TOO OLD: safe rebuild because no open position."
+                      "STATE TOO OLD: safe rebuild "
+                      "because no open position."
                   )
 
                   agent.position = None
@@ -557,7 +689,10 @@ jobs:
 
                   state_loaded = False
 
-          if state_loaded and last_timestamp is not None:
+          if (
+              state_loaded
+              and last_timestamp is not None
+          ):
 
               pending = features[
                   features["timestamp"] > last_timestamp
@@ -587,15 +722,18 @@ jobs:
 
               previous_timestamp = (
                   last_timestamp
-                  if last_timestamp is not None
-                  else None
               )
 
               for _, row in pending.iterrows():
 
-                  current_timestamp = row[
-                      "timestamp"
-                  ]
+                  current_timestamp = parse_timestamp(
+                      row["timestamp"]
+                  )
+
+                  if current_timestamp is None:
+                      fail(
+                          "Invalid pending candle timestamp."
+                      )
 
                   if previous_timestamp is not None:
 
@@ -607,126 +745,7 @@ jobs:
                       if delta != expected_step:
 
                           fail(
-                              "Safety stop: irregular or missing "
-                              "15m candle sequence."
-                          )
-
-                  previous_timestamp = (
-                      current_timestamp
-                  )
-
-          journal_changes = False
-
-          for _, row in pending.iterrows():
-
-              result = agent.process_feature_row(
-                  row.to_dict()
-              )
-
-              action = result.get(
-                  "action"
-              )
-
-              status = result.get(
-                  "status"
-              )
-
-              print(
-                  f"{row['timestamp']} | "
-                  f"ACTION={action} | "
-                  f"STATUS={status}"
-              )
-
-              if (
-                  status == "OPEN"
-                  and action == "ENTRY"
-              ):
-                  position = result.get(
-                      "position"
-                  )
-
-                  if position:
-                      if append_entry(
-                          position,
-                          source="SIGNAL",
-                      ):
-                          journal_changes = True
-
-              elif (
-                  status == "CLOSED"
-                  and action == "EXIT"
-              ):
-                  position = result.get(
-                      "position"
-                  )
-
-                  if position:
-                      if update_exit(position):
-                          journal_changes = True
-
-          if agent.position is not None:
-
-              if append_entry(
-                  agent.position,
-                  source="BOOTSTRAP",
-              ):
-                  journal_changes = True
-
-          state_payload = {
-              "version": STATE_VERSION,
-              "agent": agent.export_state(),
-              "market": MARKET,
-              "timeframe": TIMEFRAME,
-              "paper_trading": PAPER_TRADING,
-              "real_order_enabled": REAL_ORDER_ENABLED,
-              "last_run_utc": pd.Timestamp.utcnow().isoformat(),
-          }
-
-          STATE_FILE.write_text(
-              json.dumps(
-                  state_payload,
-                  indent=2,
-                  default=str,
-              ),
-              encoding="utf-8",
-          )
-
-          print("=" * 60)
-          print("FINAL STATE")
-          print("=" * 60)
-
-          print(
-              json.dumps(
-                  state_payload,
-                  indent=2,
-                  default=str,
-              )
-          )
-
-          print(
-              f"JOURNAL CHANGED     : {journal_changes}"
-          )
-
-          PY
-
-      - name: Commit trade journal
-        run: |
-          git config user.name "AI Trading Agent"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          if git diff --quiet -- TRADE_JOURNAL.md; then
-            echo "TRADE JOURNAL: no changes"
-            exit 0
-          fi
-
-          git add TRADE_JOURNAL.md
-
-          git commit -m "Update AI trading trade journal"
-
-          git push origin HEAD:main
-
-      - name: Save agent state
-        uses: actions/cache/save@v6
-        with:
-          path: .agent_state
-          key: ai-agent-state-${{ github.ref_name }}-${{ github.run_id }}
+                              "Safety stop: irregular or "
+                              "missing 15m candle sequence. "
+                              f"Previous={previous_timestamp}, "
+                              f"Current={current_timestamp
