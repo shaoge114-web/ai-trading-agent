@@ -1,0 +1,833 @@
+name: AI Trading Agent Heartbeat
+
+on:
+  # Run shortly after each 15m candle closes.
+  # 03/18/33/48 avoids the top-of-hour load window.
+  schedule:
+    - cron: "3,18,33,48 * * * *"
+
+  # Manual recovery / testing.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-trading-agent-heartbeat
+  cancel-in-progress: false
+
+jobs:
+  heartbeat:
+    name: Heartbeat
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+
+    steps:
+
+      # ==========================================================
+      # CHECKOUT
+      # ==========================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # ==========================================================
+      # PYTHON
+      # ==========================================================
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      # ==========================================================
+      # DEPENDENCIES
+      # ==========================================================
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+
+      # ==========================================================
+      # STATE DIRECTORY
+      # ==========================================================
+
+      - name: Prepare state directory
+        run: |
+          mkdir -p .agent_state
+
+      # ==========================================================
+      # RESTORE STATE
+      # ==========================================================
+
+      - name: Restore agent state
+        id: restore-state
+        uses: actions/cache/restore@v6
+        with:
+          path: .agent_state
+          key: ai-agent-state-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            ai-agent-state-${{ github.ref_name }}-
+
+      # ==========================================================
+      # RUN AGENT
+      # ==========================================================
+
+      - name: Run AI Trading Agent
+        env:
+          PAPER_TRADING: "true"
+          REAL_ORDER: "false"
+        run: |
+
+          python - <<'PY'
+          import json
+          import math
+          import os
+          from pathlib import Path
+
+          import pandas as pd
+
+          from app import (
+              agent,
+              PAPER_TRADING,
+              REAL_ORDER_ENABLED,
+          )
+
+          from OKX_LIVE_CANDLES_REFERENCE import (
+              get_okx_live_candles,
+          )
+
+          from agent_runtime import (
+              FINAL_STRATEGY,
+              calculate_verified_features,
+          )
+
+
+          # ========================================================
+          # CONSTANTS
+          # ========================================================
+
+          STATE_PATH = Path(".agent_state/state.json")
+
+          STATE_VERSION = 4
+
+          EXPECTED_INTERVAL = pd.Timedelta(minutes=15)
+
+          MAX_MARKET_DATA_AGE = pd.Timedelta(minutes=45)
+
+          REQUIRED_FEATURES = [
+              "timestamp",
+              "open",
+              "high",
+              "low",
+              "close",
+              "ATR14",
+              "RSI14",
+              "ADX",
+              "Signal_V2",
+          ]
+
+
+          # ========================================================
+          # HEADER
+          # ========================================================
+
+          print("=" * 75)
+          print("AI TRADING AGENT - LIVE HEARTBEAT")
+          print("=" * 75)
+
+          print("EVENT:", os.environ.get("GITHUB_EVENT_NAME"))
+          print("RUN ID:", os.environ.get("GITHUB_RUN_ID"))
+          print("COMMIT:", os.environ.get("GITHUB_SHA"))
+          print("BRANCH:", os.environ.get("GITHUB_REF_NAME"))
+
+          print("=" * 75)
+
+
+          # ========================================================
+          # SAFETY LOCK
+          # ========================================================
+
+          print("PAPER_TRADING:", PAPER_TRADING)
+          print("REAL_ORDER_ENABLED:", REAL_ORDER_ENABLED)
+
+          if PAPER_TRADING is not True:
+              raise RuntimeError(
+                  "SAFETY STOP: PAPER_TRADING must remain True"
+              )
+
+          if REAL_ORDER_ENABLED is not False:
+              raise RuntimeError(
+                  "SAFETY STOP: REAL_ORDER_ENABLED must remain False"
+              )
+
+          if FINAL_STRATEGY.get("one_position_only") is not True:
+              raise RuntimeError(
+                  "SAFETY STOP: one_position_only must remain enabled"
+              )
+
+
+          # ========================================================
+          # CACHE / STATE STATUS
+          # ========================================================
+
+          cache_hit = os.environ.get(
+              "CACHE_HIT",
+              ""
+          )
+
+          print("CACHE EXACT HIT:", cache_hit)
+
+
+          # ========================================================
+          # RESTORE STATE
+          # ========================================================
+
+          state_loaded = False
+          state_rebuild_required = False
+
+          if STATE_PATH.exists():
+
+              try:
+
+                  with open(
+                      STATE_PATH,
+                      "r",
+                      encoding="utf-8",
+                  ) as f:
+                      saved = json.load(f)
+
+                  saved_version = saved.get("version")
+
+                  saved_agent = saved.get(
+                      "agent",
+                      {},
+                  )
+
+                  required_agent_keys = [
+                      "status",
+                      "position",
+                      "last_signal",
+                      "last_timestamp",
+                      "last_decision",
+                  ]
+
+                  if (
+                      saved_version not in [3, 4]
+                      or not all(
+                          key in saved_agent
+                          for key in required_agent_keys
+                      )
+                  ):
+                      print(
+                          "STATE VALIDATION: INVALID VERSION/STRUCTURE"
+                      )
+                      state_rebuild_required = True
+
+                  else:
+
+                      saved_last_timestamp = (
+                          saved_agent.get("last_timestamp")
+                      )
+
+                      if saved_last_timestamp is not None:
+
+                          parsed_saved_timestamp = pd.to_datetime(
+                              saved_last_timestamp,
+                              errors="coerce",
+                          )
+
+                          if pd.isna(
+                              parsed_saved_timestamp
+                          ):
+                              print(
+                                  "STATE VALIDATION: "
+                                  "INVALID LAST TIMESTAMP"
+                              )
+                              state_rebuild_required = True
+
+                      if not state_rebuild_required:
+
+                          agent.status = saved_agent.get(
+                              "status",
+                              "READY",
+                          )
+
+                          agent.position = saved_agent.get(
+                              "position"
+                          )
+
+                          agent.last_signal = saved_agent.get(
+                              "last_signal"
+                          )
+
+                          agent.last_decision = saved_agent.get(
+                              "last_decision"
+                          )
+
+                          agent.last_timestamp = saved_agent.get(
+                              "last_timestamp"
+                          )
+
+                          state_loaded = True
+
+                          print("STATE: RESTORED")
+                          print(
+                              "STATE VERSION:",
+                              saved_version,
+                          )
+                          print(
+                              "STATUS:",
+                              agent.status,
+                          )
+                          print(
+                              "POSITION:",
+                              agent.position,
+                          )
+                          print(
+                              "LAST TIMESTAMP:",
+                              agent.last_timestamp,
+                          )
+
+              except Exception as exc:
+
+                  print(
+                      "STATE LOAD ERROR:",
+                      repr(exc),
+                  )
+
+                  state_rebuild_required = True
+
+          else:
+
+              print("STATE: NOT FOUND")
+
+              state_rebuild_required = True
+
+
+          # ========================================================
+          # MARKET DATA
+          # ========================================================
+
+          candles = get_okx_live_candles()
+
+          if candles is None or candles.empty:
+              raise RuntimeError(
+                  "OKX returned no candle data"
+              )
+
+          print("RAW CANDLES:", len(candles))
+
+
+          # ========================================================
+          # ONLY CONFIRMED CANDLES
+          # ========================================================
+
+          if "confirm" not in candles.columns:
+              raise RuntimeError(
+                  "OKX candle data missing confirm field"
+              )
+
+          confirmed = candles[
+              candles["confirm"]
+              .astype(str)
+              .str.strip()
+              .eq("1")
+          ].copy()
+
+          if confirmed.empty:
+              raise RuntimeError(
+                  "No confirmed candles available"
+              )
+
+          confirmed = (
+              confirmed
+              .sort_values("timestamp")
+              .drop_duplicates(
+                  subset=["timestamp"],
+                  keep="last",
+              )
+              .reset_index(drop=True)
+          )
+
+          print(
+              "CONFIRMED CANDLES:",
+              len(confirmed),
+          )
+
+
+          # ========================================================
+          # TIMESTAMP VALIDATION
+          # ========================================================
+
+          confirmed_timestamps = pd.to_datetime(
+              confirmed["timestamp"],
+              errors="coerce",
+          )
+
+          if confirmed_timestamps.isna().any():
+
+              raise RuntimeError(
+                  "Invalid timestamp detected in OKX candles"
+              )
+
+          if not confirmed_timestamps.is_monotonic_increasing:
+
+              raise RuntimeError(
+                  "Candle timestamps are not sorted"
+              )
+
+          timestamp_diffs = (
+              confirmed_timestamps
+              .diff()
+              .dropna()
+          )
+
+          if not timestamp_diffs.empty:
+
+              bad_intervals = timestamp_diffs[
+                  timestamp_diffs != EXPECTED_INTERVAL
+              ]
+
+              if not bad_intervals.empty:
+
+                  print(
+                      "DATA VALIDATION ERROR: "
+                      "15m candle gap detected"
+                  )
+
+                  print(
+                      "BAD INTERVALS:",
+                      bad_intervals.tolist(),
+                  )
+
+                  raise RuntimeError(
+                      "Market candle sequence is not continuous 15m data"
+                  )
+
+
+          # ========================================================
+          # FEATURE ENGINE
+          # ========================================================
+
+          features = calculate_verified_features(
+              confirmed
+          )
+
+          if features is None or features.empty:
+
+              raise RuntimeError(
+                  "Feature engine returned no rows"
+              )
+
+          features = (
+              features
+              .sort_values("timestamp")
+              .drop_duplicates(
+                  subset=["timestamp"],
+                  keep="last",
+              )
+              .reset_index(drop=True)
+          )
+
+
+          # ========================================================
+          # FEATURE VALIDATION
+          # ========================================================
+
+          missing_columns = [
+              col
+              for col in REQUIRED_FEATURES
+              if col not in features.columns
+          ]
+
+          if missing_columns:
+
+              raise RuntimeError(
+                  "Missing required feature columns: "
+                  + str(missing_columns)
+              )
+
+
+          finite_mask = (
+              features["ATR14"].apply(
+                  lambda x: math.isfinite(float(x))
+                  if pd.notna(x)
+                  else False
+              )
+              & features["RSI14"].apply(
+                  lambda x: math.isfinite(float(x))
+                  if pd.notna(x)
+                  else False
+              )
+              & features["ADX"].apply(
+                  lambda x: math.isfinite(float(x))
+                  if pd.notna(x)
+                  else False
+              )
+              & features["close"].apply(
+                  lambda x: math.isfinite(float(x))
+                  if pd.notna(x)
+                  else False
+              )
+          )
+
+          features = features[
+              finite_mask
+          ].copy()
+
+          features = (
+              features
+              .reset_index(drop=True)
+          )
+
+          if features.empty:
+
+              raise RuntimeError(
+                  "No valid finite feature rows available"
+              )
+
+
+          # ========================================================
+          # LATEST CONFIRMED CANDLE
+          # ========================================================
+
+          latest = features.iloc[-1]
+
+          latest_timestamp = pd.to_datetime(
+              latest["timestamp"],
+              errors="coerce",
+          )
+
+          if pd.isna(latest_timestamp):
+
+              raise RuntimeError(
+                  "Latest feature timestamp is invalid"
+              )
+
+          now_utc = (
+              pd.Timestamp.now(tz="UTC")
+              .tz_convert(None)
+          )
+
+          data_age = (
+              now_utc
+              - latest_timestamp
+          )
+
+          print("=" * 75)
+          print("MARKET: BTC-USDT")
+          print("TIMEFRAME: 15m")
+          print(
+              "LATEST CONFIRMED CANDLE:",
+              str(latest_timestamp),
+          )
+          print(
+              "CLOSE:",
+              latest["close"],
+          )
+          print(
+              "DATA AGE:",
+              str(data_age),
+          )
+          print("=" * 75)
+
+          if data_age > MAX_MARKET_DATA_AGE:
+
+              raise RuntimeError(
+                  "SAFETY STOP: market data is stale"
+              )
+
+
+          # ========================================================
+          # DETERMINE PROCESS MODE
+          # ========================================================
+
+          pending = None
+
+          if state_rebuild_required:
+
+              # ----------------------------------------------------
+              # FULL SAFE REBUILD
+              # ----------------------------------------------------
+
+              print(
+                  "PROCESS MODE: STATE REBUILD"
+              )
+
+              print(
+                  "Available feature rows:",
+                  len(features),
+              )
+
+              # The old state is not trusted.
+              # Reconstruct from the available confirmed window.
+              agent.position = None
+              agent.last_signal = None
+              agent.last_decision = None
+              agent.last_timestamp = None
+              agent.status = "READY"
+
+              pending = features.copy()
+
+          else:
+
+              # ----------------------------------------------------
+              # VALID RESTORED STATE
+              # ----------------------------------------------------
+
+              last_timestamp = agent.last_timestamp
+
+              if last_timestamp is None:
+
+                  print(
+                      "PROCESS MODE: RESTORED STATE WITHOUT TIMESTAMP"
+                  )
+
+                  pending = features.copy()
+
+              else:
+
+                  last_ts = pd.to_datetime(
+                      last_timestamp,
+                      errors="coerce",
+                  )
+
+                  if pd.isna(last_ts):
+
+                      raise RuntimeError(
+                          "Restored last_timestamp is invalid"
+                      )
+
+                  earliest_ts = pd.to_datetime(
+                      features["timestamp"].iloc[0],
+                      errors="coerce",
+                  )
+
+                  if pd.isna(earliest_ts):
+
+                      raise RuntimeError(
+                          "Earliest feature timestamp is invalid"
+                      )
+
+                  feature_timestamps = pd.to_datetime(
+                      features["timestamp"],
+                      errors="coerce",
+                  )
+
+                  # ------------------------------------------------
+                  # STATE GAP
+                  # ------------------------------------------------
+
+                  gap_detected = (
+                      last_ts
+                      < (
+                          earliest_ts
+                          - EXPECTED_INTERVAL
+                      )
+                  )
+
+                  print(
+                      "PROCESS MODE: INCREMENTAL"
+                  )
+
+                  print(
+                      "LAST PROCESSED:",
+                      str(last_ts),
+                  )
+
+                  print(
+                      "EARLIEST AVAILABLE:",
+                      str(earliest_ts),
+                  )
+
+                  print(
+                      "GAP DETECTED:",
+                      gap_detected,
+                  )
+
+                  if gap_detected:
+
+                      # We cannot know what happened to an old
+                      # position during unavailable candles.
+                      # Therefore rebuild only from the available
+                      # confirmed window.
+
+                      print(
+                          "RECOVERY MODE: "
+                          "REBUILD AVAILABLE CONFIRMED WINDOW"
+                      )
+
+                      agent.position = None
+                      agent.last_signal = None
+                      agent.last_decision = None
+                      agent.last_timestamp = None
+                      agent.status = "READY"
+
+                      pending = features.copy()
+
+                  else:
+
+                      pending = features[
+                          feature_timestamps
+                          > last_ts
+                      ].copy()
+
+
+          # ========================================================
+          # PROCESS CANDLES
+          # ========================================================
+
+          pending = (
+              pending
+              .sort_values("timestamp")
+              .reset_index(drop=True)
+          )
+
+          print("=" * 75)
+          print(
+              "PENDING CONFIRMED CANDLES:",
+              len(pending),
+          )
+          print("=" * 75)
+
+
+          if pending.empty:
+
+              print(
+                  "CANDLE STATUS: "
+                  "NO NEW CONFIRMED CANDLE"
+              )
+
+              print(
+                  "ACTION: WAIT"
+              )
+
+          else:
+
+              for _, row in pending.iterrows():
+
+                  current_timestamp = str(
+                      row["timestamp"]
+                  )
+
+                  print("-" * 75)
+
+                  print(
+                      "PROCESSING CONFIRMED CANDLE"
+                  )
+
+                  print(
+                      "TIMESTAMP:",
+                      current_timestamp,
+                  )
+
+                  print(
+                      "CLOSE:",
+                      row["close"],
+                  )
+
+                  print("-" * 75)
+
+                  result = agent.process_feature_row(
+                      row.to_dict()
+                  )
+
+                  print(
+                      "AGENT RESULT:"
+                  )
+
+                  print(
+                      json.dumps(
+                          result,
+                          indent=2,
+                          ensure_ascii=False,
+                          default=str,
+                      )
+                  )
+
+
+          # ========================================================
+          # EXPORT STATE
+          # ========================================================
+
+          final_agent_state = agent.export_state()
+
+          final_agent_state["last_run_id"] = os.environ.get(
+              "GITHUB_RUN_ID"
+          )
+
+          final_agent_state["last_run_event"] = os.environ.get(
+              "GITHUB_EVENT_NAME"
+          )
+
+          final_agent_state["last_run_utc"] = (
+              pd.Timestamp.now(tz="UTC").isoformat()
+          )
+
+          final_agent_state["market"] = "BTC-USDT"
+
+          final_agent_state["timeframe"] = "15m"
+
+          final_agent_state["real_order_enabled"] = (
+              REAL_ORDER_ENABLED
+          )
+
+          final_agent_state["paper_trading"] = (
+              PAPER_TRADING
+          )
+
+
+          # ========================================================
+          # SAVE STATE
+          # ========================================================
+
+          state_payload = {
+              "version": STATE_VERSION,
+              "agent": final_agent_state,
+          }
+
+          with open(
+              STATE_PATH,
+              "w",
+              encoding="utf-8",
+          ) as f:
+
+              json.dump(
+                  state_payload,
+                  f,
+                  indent=2,
+                  ensure_ascii=False,
+                  default=str,
+              )
+
+
+          print("=" * 75)
+          print("STATE SAVED")
+          print("=" * 75)
+
+          print(
+              json.dumps(
+                  state_payload,
+                  indent=2,
+                  ensure_ascii=False,
+                  default=str,
+              )
+          )
+
+          print("=" * 75)
+          print("HEARTBEAT COMPLETE")
+          print("=" * 75)
+
+          PY
+
+      # ==========================================================
+      # SAVE STATE
+      # ==========================================================
+
+      - name: Save agent state
+        if: success()
+        uses: actions/cache/save@v6
+        with:
+          path: .agent_state
+          key: ai-agent-state-${{ github.ref_name }}-${{ github.run_id }}
