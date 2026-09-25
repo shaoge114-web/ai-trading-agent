@@ -45,3 +45,5 @@ No real order is permitted until explicitly enabled and separately verified.
   - Bars Held: 3
   - Status: OPEN
 - This existing position must not be duplicated as a new entry by the journal.
+
+| BTC-USDT-SHORT-20260925-133000 | SHORT | 2026-09-25 13:30:00 | 84016.60000000 | 84316.38286407 | 82817.46854373 |  |  |  |  | 16 | OPEN | BOOTSTRAP |
