@@ -91,4 +91,83 @@ class FinalTradingAgent:
             return {
                 "status": "OPEN",
                 "action": "HOLD",
-                "position": deepcopy(self
+                "position": deepcopy(self.position),
+            }
+
+        decision_result = agent_core_decision_v2(
+            pd.Series(feature_row),
+            self.strategy,
+        )
+
+        self.last_decision = deepcopy(decision_result)
+
+        assert decision_result["status"] == "OK"
+
+        decision = decision_result.get("decision")
+        self.last_signal = decision
+
+        if decision not in ["LONG", "SHORT"]:
+            self.status = "WAITING"
+
+            return {
+                "status": "WAITING",
+                "action": "WAIT",
+                "decision": decision,
+                "timestamp": timestamp,
+                "reason": decision_result.get("reason"),
+            }
+
+        new_position = create_position_state(decision_result)
+
+        assert new_position is not None
+        assert new_position["position_status"] == "OPEN"
+
+        self.position = deepcopy(new_position)
+        self.status = "POSITION_OPEN"
+
+        return {
+            "status": "OPEN",
+            "action": "ENTRY",
+            "decision": decision,
+            "position": deepcopy(self.position),
+        }
+
+    def process_candles(self, candles):
+
+        if isinstance(candles, pd.Series):
+            candles = pd.DataFrame([candles.to_dict()])
+
+        elif isinstance(candles, dict):
+            candles = pd.DataFrame([candles])
+
+        else:
+            candles = candles.copy()
+
+        results = []
+
+        for _, row in candles.iterrows():
+
+            result = self.process_feature_row(row.to_dict())
+            results.append(result)
+
+            if result.get("status") == "CLOSED":
+                break
+
+        return results
+
+    def get_state(self):
+        return {
+            "status": self.status,
+            "position": deepcopy(self.position),
+            "last_signal": self.last_signal,
+            "last_timestamp": self.last_timestamp,
+            "last_decision": deepcopy(self.last_decision),
+        }
+
+    def export_state(self):
+        return json.loads(
+            json.dumps(
+                self.get_state(),
+                default=str,
+            )
+        )
