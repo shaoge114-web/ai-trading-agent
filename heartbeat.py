@@ -599,7 +599,7 @@ def read_journal():
                 for p in line.split("|")
             ]
 
-            if len(parts) < 15:
+            if len(parts) < 16:
                 continue
 
             trade_id = parts[1]
@@ -650,6 +650,7 @@ def journal_append_entry(
     row = (
         "| "
         f"{trade_id} | "
+        "BTC-USDT | "
         f"{position['position']} | "
         f"{entry_timestamp} | "
         f"{position['entry']:.8f} | "
@@ -754,7 +755,7 @@ def journal_update_exit(
             for p in line.split("|")
         ]
 
-        if len(parts) < 15:
+        if len(parts) < 16:
             new_lines.append(line)
             continue
 
@@ -762,32 +763,32 @@ def journal_update_exit(
             new_lines.append(line)
             continue
 
-        parts[7] = str(
+        parts[8] = str(
             normalize_timestamp(
                 exit_timestamp
             )
         )
 
-        parts[8] = (
+        parts[9] = (
             f"{float(exit_price):.8f}"
         )
 
-        parts[9] = str(
+        parts[10] = str(
             exit_reason
         )
 
-        parts[10] = (
+        parts[11] = (
             f"{float(r_value):.4f}"
         )
 
-        parts[11] = str(
+        parts[12] = str(
             position.get(
                 "bars_held",
                 0,
             )
         )
 
-        parts[12] = "CLOSED"
+        parts[13] = "CLOSED"
 
         rebuilt = (
             "|"
