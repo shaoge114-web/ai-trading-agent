@@ -60,7 +60,7 @@ jobs:
 
       - name: Save agent state
         uses: actions/cache/save@v4
-        if: always()
+        if: success()
         with:
           path: .agent_state
           key: ai-agent-state-${{ github.run_id }}
