@@ -1,5 +1,15 @@
 import { loadAgentState, saveAgentState } from "./d1_state.js";
 
+function isAuthorized(request, env) {
+  const token = env.AGENT_STATE_TOKEN;
+
+  if (!token) {
+    return false;
+  }
+
+  return request.headers.get("Authorization") === "Bearer " + token;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -9,7 +19,7 @@ export default {
         return Response.json({
           status: "OK",
           service: "ai-trading-gateway",
-          version: "GATEWAY_V1",
+          version: "GATEWAY_V2",
           paper_trading: true,
           real_order_enabled: false
         });
@@ -24,43 +34,63 @@ export default {
         });
       }
 
-      if (url.pathname === "/db-test") {
-        const result = await env.DB
-          .prepare("SELECT 1 AS ok")
-          .first();
+      if (url.pathname === "/internal/state") {
+        if (!env.AGENT_STATE_TOKEN) {
+          return Response.json({
+            status: "ERROR",
+            error: "STATE_AUTH_NOT_CONFIGURED"
+          }, { status: 503 });
+        }
+
+        if (!isAuthorized(request, env)) {
+          return Response.json({
+            status: "UNAUTHORIZED"
+          }, { status: 401 });
+        }
+
+        if (request.method === "GET") {
+          const state = await loadAgentState(env);
+
+          return Response.json({
+            status: "OK",
+            state
+          });
+        }
+
+        if (request.method === "PUT") {
+          const body = await request.json();
+
+          const required = [
+            "version",
+            "status",
+            "position",
+            "last_signal",
+            "last_timestamp",
+            "last_decision"
+          ];
+
+          for (const key of required) {
+            if (!(key in body)) {
+              return Response.json({
+                status: "ERROR",
+                error: "MISSING_STATE_FIELD: " + key
+              }, { status: 400 });
+            }
+          }
+
+          await saveAgentState(env, body);
+
+          return Response.json({
+            status: "OK",
+            saved: true,
+            paper_trading: true,
+            real_order_enabled: false
+          });
+        }
 
         return Response.json({
-          status: "OK",
-          database: "CONNECTED",
-          result
-        });
-      }
-
-      if (url.pathname === "/db-state-test") {
-        const before = await loadAgentState(env);
-
-        const testState = {
-          version: 5,
-          status: "D1_TEST",
-          position: null,
-          last_signal: "D1_TEST",
-          last_timestamp: new Date().toISOString(),
-          last_decision: null
-        };
-
-        await saveAgentState(env, testState);
-
-        const after = await loadAgentState(env);
-
-        return Response.json({
-          status: "OK",
-          database: "CONNECTED",
-          state_write: "PASS",
-          state_read: after ? "PASS" : "FAIL",
-          previous_state_exists: before !== null,
-          real_order_enabled: false,
-          paper_trading: true
-        });
+          status: "METHOD_NOT_ALLOWED"
+        }, { status: 405 });
       }
 
       return Response.json({
